@@ -1,3 +1,6 @@
+
+# train_model.py
+
 from pathlib import Path
 
 import joblib
@@ -14,10 +17,7 @@ from sklearn.metrics import (
 
 from xgboost import XGBClassifier
 
-from feature_extractor import (
-    extract_features,
-    FEATURE_COLUMNS,
-)
+from feature_extractor import extract_features
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -27,14 +27,41 @@ MODEL_DIR = BASE_DIR / "model"
 MODEL_PATH = MODEL_DIR / "xgboost_model.pkl"
 
 
+# feature_extractor.py에서 실제 반환하는 숫자형 특징만 사용
+# risk_score, rule_prediction은 규칙 기반 결과이므로 학습에서 제외
+FEATURE_NAMES = [
+    "url_length",
+    "hostname_length",
+    "special_char_count",
+    "has_ip",
+    "has_https",
+    "uses_http",
+    "has_userinfo_at",
+    "has_punycode",
+    "has_suspicious_keyword",
+    "keyword_count",
+    "has_caution_tld",
+    "subdomain_count",
+    "has_2plus_subdomains",
+    "hyphen_count",
+    "hostname_hyphen_count",
+    "has_hostname_hyphen",
+    "hostname_digit_count",
+    "has_hostname_4plus_digits",
+    "has_url_length_75plus",
+]
+
+
 def load_dataset():
+    """실제 학습 데이터셋 불러오기"""
 
     if not DATASET_PATH.exists():
-        raise FileNotFoundError(DATASET_PATH)
+        raise FileNotFoundError(
+            f"학습 데이터셋이 없습니다: {DATASET_PATH}"
+        )
 
     df = pd.read_excel(DATASET_PATH)
 
-    # 열 이름 통일
     df.columns = [
         str(col).strip().lower()
         for col in df.columns
@@ -42,10 +69,9 @@ def load_dataset():
 
     if "url" not in df.columns or "label" not in df.columns:
         raise ValueError(
-            "데이터셋에는 URL과 Label 열이 필요합니다."
+            "learning_dataset.xlsx에는 URL과 Label 열이 필요합니다."
         )
 
-    # 라벨 검증
     df = df.dropna(subset=["url", "label"]).copy()
 
     df["label"] = pd.to_numeric(
@@ -57,23 +83,24 @@ def load_dataset():
 
     if not df["label"].isin([0, 1]).all():
         raise ValueError(
-            "Label은 0(정상), 1(피싱)만 허용합니다."
+            "Label은 0(정상), 1(피싱)으로 구성되어야 합니다."
         )
 
     df["label"] = df["label"].astype(int)
 
     if df["label"].nunique() != 2:
         raise ValueError(
-            "정상 URL과 피싱 URL이 모두 필요합니다."
+            "정상 URL과 피싱 URL이 모두 있어야 합니다."
         )
 
     return df
 
 
 def prepare_features(df):
+    """URL에서 특징을 추출하여 학습 데이터 구성"""
 
     feature_rows = []
-    valid_labels = []
+    labels = []
 
     for index, row in df.iterrows():
 
@@ -81,27 +108,27 @@ def prepare_features(df):
             features = extract_features(row["url"])
 
             feature_rows.append({
-                col: features[col]
-                for col in FEATURE_COLUMNS
+                name: features[name]
+                for name in FEATURE_NAMES
             })
 
-            valid_labels.append(row["label"])
+            labels.append(row["label"])
 
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, KeyError) as exc:
             print(
-                f"행 {index + 2} 분석 실패: {exc}"
+                f"{index + 2}행 URL 분석 실패: {exc}"
             )
 
     X = pd.DataFrame(
         feature_rows,
-        columns=FEATURE_COLUMNS
+        columns=FEATURE_NAMES
     )
 
-    y = pd.Series(valid_labels, dtype=int)
+    y = pd.Series(labels, dtype=int)
 
     if len(X) == 0 or y.nunique() != 2:
         raise ValueError(
-            "유효한 학습 데이터가 부족합니다."
+            "학습에 사용할 수 있는 데이터가 부족합니다."
         )
 
     return X, y
@@ -109,43 +136,47 @@ def prepare_features(df):
 
 def train_and_save_model():
 
-    print("=== 데이터 불러오기 ===")
+    print("=== 학습 데이터 불러오기 ===")
 
     df = load_dataset()
 
     print(f"전체 데이터: {len(df)}개")
+    print("\n라벨 분포:")
     print(df["label"].value_counts())
 
-    print("\n=== 특징 추출 ===")
+    print("\n=== URL 특징 추출 ===")
 
     X, y = prepare_features(df)
 
     print(f"유효 데이터: {len(X)}개")
-    print(f"사용 피처: {len(FEATURE_COLUMNS)}개")
+    print(f"사용 특징: {len(FEATURE_NAMES)}개")
 
     # 학습 데이터와 검증 데이터 분리
-    X_train, X_valid, y_train, y_valid = (
-        train_test_split(
-            X,
-            y,
-            test_size=0.2,
-            random_state=42,
-            stratify=y
+    class_counts = y.value_counts()
+
+    if class_counts.min() < 2:
+        raise ValueError(
+            "각 클래스에 최소 2개 이상의 데이터가 필요합니다."
         )
+
+    X_train, X_valid, y_train, y_valid = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
+        stratify=y
     )
 
     # 클래스 불균형 대응
     negative_count = (y_train == 0).sum()
     positive_count = (y_train == 1).sum()
 
-    scale_pos_weight = (
-        negative_count / positive_count
-    )
+    scale_pos_weight = negative_count / positive_count
 
-    print("\n=== XGBoost 학습 ===")
+    print("\n=== XGBoost 모델 학습 ===")
 
     model = XGBClassifier(
-        n_estimators=300,
+        n_estimators=200,
         max_depth=4,
         learning_rate=0.05,
         subsample=0.8,
@@ -159,10 +190,10 @@ def train_and_save_model():
 
     model.fit(X_train, y_train)
 
-    # 검증 데이터 평가
+    # 검증 데이터 예측
     predictions = model.predict(X_valid)
 
-    print("\n=== 검증 결과 ===")
+    print("\n=== 모델 검증 결과 ===")
 
     print(
         "Accuracy:",
@@ -205,6 +236,7 @@ def train_and_save_model():
         )
     )
 
+    print("\n상세 분류 결과:")
     print(
         classification_report(
             y_valid,
@@ -221,9 +253,8 @@ def train_and_save_model():
 
     save_data = {
         "model": model,
-        "feature_names": FEATURE_COLUMNS,
+        "feature_names": FEATURE_NAMES,
         "threshold": 0.5,
-        "classes": [0, 1],
     }
 
     joblib.dump(save_data, MODEL_PATH)
