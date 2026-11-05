@@ -2,8 +2,8 @@
 
 ## 실행 순서
 ### ① 가상환경 및 라이브러리 설치
-python -m venv venv
-venv\Scripts\activate
+python -m venv venv \n
+venv\Scripts\activate \n
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
