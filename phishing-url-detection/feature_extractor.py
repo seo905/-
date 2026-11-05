@@ -1,4 +1,11 @@
+"""URL 특징 추출 + 확정된 20점 규칙 점수 계산.
 
+설치: pip install pandas openpyxl tldextract
+실행: python feature_extractor.py
+입력: learning_dataset.xlsx (URL 열 필수)
+출력: learning_features.xlsx
+주의: URL에 접속하지 않으며, 이 점수는 초기 규칙 기반 분류 결과입니다.
+"""
 import ipaddress
 import re
 from pathlib import Path
@@ -7,261 +14,127 @@ from urllib.parse import urlsplit
 import pandas as pd
 import tldextract
 
-
-BASE_DIR = Path(__file__).resolve().parent
-
-INPUT_FILE = BASE_DIR / "learning_dataset.xlsx"
-OUTPUT_FILE = BASE_DIR / "learning_features.xlsx"
-
+INPUT_FILE = Path(__file__).resolve().parent / "learning_dataset.xlsx"
+OUTPUT_FILE = Path(__file__).resolve().parent / "learning_features.xlsx"
+THRESHOLD = 2
 KEYWORDS = (
-    "login", "signin", "verify", "secure",
-    "account", "update", "banking", "password",
-    "payment", "support", "authentication"
+    "login", "signin", "verify", "secure", "account", "update",
+    "banking", "password", "payment", "support", "authentication",
 )
-
+# '등'으로 언급된 추가 TLD는 확정되지 않았으므로 명시된 다섯 개만 적용
 CAUTION_TLDS = {"shop", "cfd", "sbs", "xyz", "top"}
-
 SPECIAL_CHARS = "@_%?&=+#"
+EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
 
-EXTRACTOR = tldextract.TLDExtract(
-    suffix_list_urls=()
+# 규칙명, 결과 특징명, 가중치: 합계 20점
+RULES = (
+    ("IP 주소 직접 사용", "has_ip", 4),
+    ("사용자 정보 영역 @", "has_userinfo_at", 3),
+    ("Punycode", "has_punycode", 2),
+    ("의심 키워드", "has_suspicious_keyword", 2),
+    ("주의 대상 TLD", "has_caution_tld", 2),
+    ("호스트 하이픈", "has_hostname_hyphen", 2),
+    ("호스트 숫자 4개 이상", "has_hostname_4plus_digits", 2),
+    ("서브도메인 2단계 이상", "has_2plus_subdomains", 1),
+    ("URL 길이 75자 이상", "has_url_length_75plus", 1),
+    ("HTTP 사용", "uses_http", 1),
 )
-
-# XGBoost 학습 및 예측에 공통으로 사용할 피처
-FEATURE_COLUMNS = [
-    "url_length",
-    "hostname_length",
-    "path_length",
-    "query_length",
-    "special_char_count",
-    "dot_count",
-    "hyphen_count",
-    "hostname_digit_count",
-    "subdomain_count",
-    "keyword_count",
-    "has_ip",
-    "has_https",
-    "uses_http",
-    "has_userinfo_at",
-    "has_punycode",
-    "has_suspicious_keyword",
-    "has_caution_tld",
-    "has_hostname_hyphen",
-    "has_hostname_4plus_digits",
-    "has_2plus_subdomains",
-    "has_url_length_75plus",
-    "has_encoded_chars",
-    "query_parameter_count",
-]
+assert sum(weight for _, _, weight in RULES) == 20
 
 
 def extract_features(raw_url):
-    """URL 문자열에서 정적 특징을 추출한다."""
-
+    """문자열만 분석합니다. 외부 접속은 하지 않습니다."""
     if pd.isna(raw_url) or not str(raw_url).strip():
         raise ValueError("URL이 비어 있습니다.")
-
     url = str(raw_url).strip()
-
-    # 스킴이 없는 URL도 분석 가능하도록 처리
-    has_scheme = bool(
-        re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url)
-    )
-
-    parsed = urlsplit(
-        url if has_scheme else "//" + url
-    )
-
+    has_scheme = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url))
+    parsed = urlsplit(url if has_scheme else "//" + url)
     try:
         hostname = (parsed.hostname or "").lower().rstrip(".")
-        _ = parsed.port
+        port = parsed.port  # 잘못된 포트 값 검증
     except ValueError as exc:
-        raise ValueError(f"잘못된 URL 형식: {exc}") from exc
-
+        raise ValueError(f"호스트 또는 포트 형식 오류: {exc}") from exc
     if not hostname:
         raise ValueError("호스트를 찾을 수 없습니다.")
 
-    # IP 주소 여부
     try:
         ipaddress.ip_address(hostname)
         has_ip = 1
     except ValueError:
         has_ip = 0
 
-    # 도메인 및 서브도메인 분석
     if has_ip:
-        domain_suffix = ""
-        subdomain_count = 0
+        registered_domain, domain_suffix, subdomain_count = hostname, "", 0
     else:
         parts = EXTRACTOR(hostname)
+        registered_domain = ".".join(p for p in (parts.domain, parts.suffix) if p)
         domain_suffix = parts.suffix
-        subdomain_count = len(
-            [x for x in parts.subdomain.split(".") if x]
-        )
+        subdomain_count = len([p for p in parts.subdomain.split(".") if p])
 
-    # 의심 키워드
-    matched_keywords = [
+    matched = [
         word for word in KEYWORDS
-        if re.search(
-            r"(?<![a-z])" + re.escape(word) + r"(?![a-z])",
-            url.lower()
-        )
+        if re.search(r"(?<![a-z])" + re.escape(word) + r"(?![a-z])", url.lower())
     ]
-
-    # 숫자 개수
-    hostname_digit_count = sum(
-        char.isdigit() and char.isascii()
-        for char in hostname
-    )
-
-    # 사용자 정보 영역의 @
+    hostname_digit_count = sum(char.isascii() and char.isdigit() for char in hostname)
+    # '@'는 경로나 쿼리가 아니라 사용자 정보 영역에 있는 경우만 해당
     has_userinfo_at = int("@" in parsed.netloc)
-
-    # 인코딩 문자
-    encoded_count = len(
-        re.findall(r"%[0-9a-fA-F]{2}", url)
-    )
-
-    # 쿼리 파라미터 개수
-    query_parameter_count = (
-        len([x for x in parsed.query.split("&") if x])
-        if parsed.query else 0
-    )
-
+    has_https = int(parsed.scheme.lower() == "https")
+    uses_http = int(parsed.scheme.lower() == "http")
     features = {
         "url_length": len(url),
-        "hostname_length": len(hostname),
-        "path_length": len(parsed.path),
-        "query_length": len(parsed.query),
-        "special_char_count": sum(
-            url.count(char) for char in SPECIAL_CHARS
-        ),
-        "dot_count": hostname.count("."),
-        "hyphen_count": url.count("-"),
-        "hostname_digit_count": hostname_digit_count,
-        "subdomain_count": subdomain_count,
-        "keyword_count": len(matched_keywords),
-
-        "has_ip": has_ip,
-        "has_https": int(parsed.scheme.lower() == "https"),
-        "uses_http": int(parsed.scheme.lower() == "http"),
-        "has_userinfo_at": has_userinfo_at,
-
-        "has_punycode": int(
-            any(
-                label.startswith("xn--")
-                for label in hostname.split(".")
-            )
-        ),
-
-        "has_suspicious_keyword": int(
-            bool(matched_keywords)
-        ),
-
-        "has_caution_tld": int(
-            domain_suffix.lower() in CAUTION_TLDS
-        ),
-
-        "has_hostname_hyphen": int(
-            "-" in hostname
-        ),
-
-        "has_hostname_4plus_digits": int(
-            hostname_digit_count >= 4
-        ),
-
-        "has_2plus_subdomains": int(
-            subdomain_count >= 2
-        ),
-
-        "has_url_length_75plus": int(
-            len(url) >= 75
-        ),
-
-        "has_encoded_chars": int(
-            encoded_count > 0
-        ),
-
-        "query_parameter_count": query_parameter_count,
-
-        # 설명용 정보
         "hostname": hostname,
-        "matched_keywords": ", ".join(matched_keywords),
+        "registered_domain": registered_domain,
+        "domain_suffix": domain_suffix,
+        "hostname_length": len(hostname),
+        "special_char_count": sum(url.count(char) for char in SPECIAL_CHARS),
+        "has_ip": has_ip,
+        "has_https": has_https,
+        "uses_http": uses_http,
+        "has_userinfo_at": has_userinfo_at,
+        "has_punycode": int(any(label.startswith("xn--") for label in hostname.split("."))),
+        "has_suspicious_keyword": int(bool(matched)),
+        "keyword_count": len(matched),
+        "matched_keywords": ", ".join(matched),
+        "has_caution_tld": int(domain_suffix.lower() in CAUTION_TLDS),
+        "subdomain_count": subdomain_count,
+        "has_2plus_subdomains": int(subdomain_count >= 2),
+        "hyphen_count": url.count("-"),
+        "hostname_hyphen_count": hostname.count("-"),
+        "has_hostname_hyphen": int("-" in hostname),
+        "hostname_digit_count": hostname_digit_count,
+        "has_hostname_4plus_digits": int(hostname_digit_count >= 4),
+        "has_url_length_75plus": int(len(url) >= 75),
     }
-
-    # 기존 규칙 기반 점수 유지
-    rule_weights = {
-        "has_ip": 4,
-        "has_userinfo_at": 3,
-        "has_punycode": 2,
-        "has_suspicious_keyword": 2,
-        "has_caution_tld": 2,
-        "has_hostname_hyphen": 2,
-        "has_hostname_4plus_digits": 2,
-        "has_2plus_subdomains": 1,
-        "has_url_length_75plus": 1,
-        "uses_http": 1,
-    }
-
-    features["risk_score"] = sum(
-        features[key] * weight
-        for key, weight in rule_weights.items()
-    )
-
-    features["rule_prediction"] = int(
-        features["risk_score"] >= 2
-    )
-
-    features["rule_result"] = (
-        "피싱" if features["rule_prediction"] else "정상"
-    )
-
+    score = sum(features[column] * weight for _, column, weight in RULES)
+    features["risk_score"] = score
+    features["rule_prediction"] = int(score >= THRESHOLD)  # 1=피싱, 0=정상
+    features["rule_result"] = "피싱" if score >= THRESHOLD else "정상"
+    features["matched_rules"] = ", ".join(name for name, column, _ in RULES if features[column])
     return features
 
 
 def main():
-
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(INPUT_FILE)
-
     data = pd.read_excel(INPUT_FILE)
-
-    columns = {
-        str(col).strip().lower(): col
-        for col in data.columns
-    }
-
+    columns = {str(column).strip().lower(): column for column in data.columns}
     if "url" not in columns:
         raise ValueError("엑셀에 URL 열이 필요합니다.")
-
     results = []
-
     for index, url in enumerate(data[columns["url"]], start=2):
-
         try:
             results.append(extract_features(url))
-
         except (ValueError, TypeError) as exc:
-            results.append({
-                "parse_error": str(exc)
-            })
-
-            print(f"{index}행 분석 실패: {exc}")
-
-    features_df = pd.DataFrame(results)
-
-    output = pd.concat(
-        [
-            data.reset_index(drop=True),
-            features_df.reset_index(drop=True)
-        ],
-        axis=1
-    )
-
+            results.append({"parse_error": str(exc)})
+            print(f"엑셀 {index}행 확인 필요: {exc}")
+    features = pd.DataFrame(results)
+    duplicate_columns = set(data.columns) & set(features.columns)
+    if duplicate_columns:
+        raise ValueError(f"기존 열과 추출 특징 열이 중복됩니다: {sorted(duplicate_columns)}")
+    output = pd.concat([data.reset_index(drop=True), features], axis=1)
     output.to_excel(OUTPUT_FILE, index=False)
-
-    print(f"특징 추출 완료: {OUTPUT_FILE}")
+    print(f"완료: {len(output)}개 URL → {OUTPUT_FILE}")
+    print(f"점수 기준: {THRESHOLD}점 이상 피싱, 1=피싱/0=정상")
 
 
 if __name__ == "__main__":
     main()
+
