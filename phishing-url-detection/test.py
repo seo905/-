@@ -79,6 +79,3 @@ def evaluate_performance(test_file_path):
 
 if __name__ == "__main__":
     evaluate_performance('test_dataset.xlsx')
-
-if __name__ == "__main__":
-    evaluate_performance()
