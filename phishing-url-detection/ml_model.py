@@ -1,13 +1,12 @@
 
+# ml_model.py
+
 from pathlib import Path
 
 import joblib
 import pandas as pd
 
-from feature_extractor import (
-    extract_features,
-    FEATURE_COLUMNS,
-)
+from feature_extractor import extract_features
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -22,6 +21,7 @@ _THRESHOLD = None
 
 
 def _load_model():
+    """학습된 모델을 최초 1회 불러오기"""
 
     global _MODEL
     global _FEATURE_NAMES
@@ -44,7 +44,6 @@ def _load_model():
         )
 
     _MODEL = saved_data["model"]
-
     _FEATURE_NAMES = saved_data["feature_names"]
 
     _THRESHOLD = saved_data.get(
@@ -52,33 +51,35 @@ def _load_model():
         0.5
     )
 
-    if _FEATURE_NAMES != FEATURE_COLUMNS:
-        raise ValueError(
-            "학습 모델과 현재 Feature 구조가 다릅니다. "
-            "train_model.py를 다시 실행하세요."
-        )
-
 
 def predict(features: dict) -> dict:
     """
-    추출된 Feature를 이용한 피싱 URL 예측
+    추출된 특징값을 이용해 피싱 URL 예측
+
+    입력:
+        extract_features()가 반환하는 특징값
+
+    출력:
+        prediction, probability, risk_level
     """
 
     _load_model()
 
+    # 필수 특징 누락 여부 확인
     missing_features = [
-        col for col in _FEATURE_NAMES
-        if col not in features
+        name
+        for name in _FEATURE_NAMES
+        if name not in features
     ]
 
     if missing_features:
         raise ValueError(
-            f"필수 Feature 누락: {missing_features}"
+            f"필수 특징값이 누락되었습니다: {missing_features}"
         )
 
-    # 학습 시 사용한 피처 순서와 동일하게 구성
+    # 학습 당시 특징 순서와 동일하게 구성
     input_df = pd.DataFrame(
-        [[features[col] for col in _FEATURE_NAMES]],
+        [[features[name] for name in _FEATURE_NAMES]],
         columns=_FEATURE_NAMES
     )
 
@@ -86,6 +87,11 @@ def predict(features: dict) -> dict:
     probabilities = _MODEL.predict_proba(input_df)[0]
 
     classes = list(_MODEL.classes_)
+
+    if 1 not in classes:
+        raise ValueError(
+            "모델에 피싱 클래스(1)가 없습니다."
+        )
 
     phishing_index = classes.index(1)
 
@@ -115,37 +121,19 @@ def predict(features: dict) -> dict:
 
 def predict_url(url: str) -> dict:
     """
-    URL을 입력받아 특징 추출부터 예측까지 수행
+    URL 입력부터 특징 추출 및 머신러닝 예측까지 수행
     """
 
     features = extract_features(url)
 
     result = predict(features)
 
-    # 규칙 기반 분석 결과도 별도 제공
-    result["rule_score"] = features["risk_score"]
-
-    result["matched_keywords"] = (
-        features["matched_keywords"]
-    )
-
+    # 규칙 기반 분석 결과도 함께 제공
     result["hostname"] = features["hostname"]
-
-    result["matched_rules"] = [
-        key for key in [
-            "has_ip",
-            "has_userinfo_at",
-            "has_punycode",
-            "has_suspicious_keyword",
-            "has_caution_tld",
-            "has_hostname_hyphen",
-            "has_hostname_4plus_digits",
-            "has_2plus_subdomains",
-            "has_url_length_75plus",
-            "uses_http",
-        ]
-        if features[key]
-    ]
+    result["rule_score"] = features["risk_score"]
+    result["rule_result"] = features["rule_result"]
+    result["matched_keywords"] = features["matched_keywords"]
+    result["matched_rules"] = features["matched_rules"]
 
     return result
 
@@ -165,6 +153,10 @@ if __name__ == "__main__":
 
             print("\nURL:", url)
             print("예측 결과:", result)
+
+        except (ValueError, FileNotFoundError) as exc:
+            print("\n분석 실패:", exc)
+)
 
         except (ValueError, FileNotFoundError) as exc:
             print("분석 실패:", exc)
