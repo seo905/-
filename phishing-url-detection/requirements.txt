@@ -1,23 +1,7 @@
-# 데이터 처리 및 수치 계산
 numpy>=1.24.0
 pandas>=2.0.0
-
-# 머신러닝 모델 및 평가
 scikit-learn>=1.3.0
 xgboost>=2.0.0
 joblib>=1.3.0
-
-# URL 파싱 및 네트워크 피처 추출
 tldextract>=5.1.0
-python-whois>=0.9.0
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-
-# 모델 설명 가능성 (XAI) 및 시각화
-shap>=0.43.0
-matplotlib>=3.8.0
-seaborn>=0.13.0
-
-# 개발 및 환경 관리
-jupyterlab>=4.0.0
-python-dotenv>=1.0.0
+openpyxl>=3.1.0
