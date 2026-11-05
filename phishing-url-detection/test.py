@@ -1,81 +1,260 @@
+from pathlib import Path
+
 import pandas as pd
+
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report,
+)
+
 from feature_extractor import extract_features
+from ml_model import predict_url
 
-def check_rules(features):
-    rule_score = 0
-    if features.get("has_ip"): rule_score += 4
-    if features.get("has_userinfo_at"): rule_score += 3
-    if features.get("has_punycode"): rule_score += 2
-    if features.get("has_suspicious_keyword"): rule_score += 2
-    if features.get("has_caution_tld"): rule_score += 2
-    if features.get("has_hostname_hyphen"): rule_score += 2
-    if features.get("has_hostname_4plus_digits"): rule_score += 2
-    if features.get("has_2plus_subdomains"): rule_score += 1
-    if features.get("has_url_length_75plus"): rule_score += 1
-    if features.get("uses_http"): rule_score += 1
 
-    return {"rule_score": rule_score, "is_phishing": rule_score >= 2}
+BASE_DIR = Path(__file__).resolve().parent
 
-def evaluate_performance(test_file_path):
-    df = pd.read_excel(test_file_path)
-    TP, TN, FP, FN = 0, 0, 0, 0
-    
-    # 결과를 저장할 리스트
+TEST_FILE = BASE_DIR / "test_dataset.xlsx"
+
+OUTPUT_FILE = (
+    BASE_DIR / "test_results_detailed.xlsx"
+)
+
+
+def evaluate_performance():
+
+    if not TEST_FILE.exists():
+        raise FileNotFoundError(TEST_FILE)
+
+    df = pd.read_excel(TEST_FILE)
+
+    df.columns = [
+        str(col).strip().lower()
+        for col in df.columns
+    ]
+
+    if "url" not in df.columns or "label" not in df.columns:
+        raise ValueError(
+            "테스트 데이터에 URL과 Label 열이 필요합니다."
+        )
+
+    df = df.dropna(
+        subset=["url", "label"]
+    ).copy()
+
+    df["label"] = pd.to_numeric(
+        df["label"],
+        errors="coerce"
+    )
+
+    df = df.dropna(subset=["label"])
+
+    if not df["label"].isin([0, 1]).all():
+        raise ValueError(
+            "Label은 0 또는 1이어야 합니다."
+        )
+
+    actual_labels = []
+    predicted_labels = []
+    rule_predictions = []
     results = []
-    
-    for index, row in df.iterrows():
-        url = row['URL']
-        actual_label = row['Label']
-        is_actual_phishing = (actual_label == 1) 
-        
-        try:
-            features = extract_features(url)
-            rule_result = check_rules(features)
-            predicted_phishing = rule_result['is_phishing']
-            score = rule_result['rule_score']
-        except Exception as e:
-            predicted_phishing = False
-            score = 0
-            
-        # 개별 URL의 분류 결과 판별
-        if is_actual_phishing and predicted_phishing: 
-            TP += 1
-            result_type = 'TP (탐지 성공)'
-        elif not is_actual_phishing and not predicted_phishing: 
-            TN += 1
-            result_type = 'TN (정상 분류)'
-        elif not is_actual_phishing and predicted_phishing: 
-            FP += 1
-            result_type = 'FP (오탐 - 정상인데 피싱으로 분류)'
-        elif is_actual_phishing and not predicted_phishing: 
-            FN += 1
-            result_type = 'FN (미탐 - 피싱인데 정상으로 분류)'
-            
-        # 결과 리스트에 데이터 추가
-        results.append({
-            'URL': url,
-            '실제 라벨': '피싱' if is_actual_phishing else '정상',
-            '예측 라벨': '피싱' if predicted_phishing else '정상',
-            '위험 점수': score,
-            '분류 결과': result_type
-        })
 
-    # 기존 성능 평가 지표 출력
-    total = TP + TN + FP + FN
-    accuracy = (TP + TN) / total if total > 0 else 0
-    precision = TP / (TP + FP) if (TP + FP) > 0 else 0
-    recall = TP / (TP + FN) if (TP + FN) > 0 else 0
-    
-    print("=== 테스트 데이터 성능 평가 결과표 ===")
-    print(f"정확도(Accuracy): {accuracy * 100:.1f}%")
-    print(f"정밀도(Precision): {precision * 100:.1f}%")
-    print(f"재현율(Recall): {recall * 100:.1f}%")
-    print(f"오탐 건수(False Positives): {FP}개")
-    
-    # 분석 결과를 엑셀 파일로 변환하여 저장
+    for index, row in df.iterrows():
+
+        url = row["url"]
+        actual = int(row["label"])
+
+        try:
+            # XGBoost 예측
+            prediction = predict_url(url)
+
+            predicted = int(
+                prediction["prediction"] != "safe"
+            )
+
+            # 규칙 기반 예측
+            features = extract_features(url)
+
+            rule_predicted = int(
+                features["rule_prediction"]
+            )
+
+            actual_labels.append(actual)
+            predicted_labels.append(predicted)
+            rule_predictions.append(rule_predicted)
+
+            results.append({
+                "URL": url,
+                "실제 라벨": actual,
+                "실제 결과": (
+                    "피싱" if actual == 1 else "정상"
+                ),
+                "ML 예측 결과": (
+                    "피싱" if predicted == 1 else "정상"
+                ),
+                "ML 피싱 확률": prediction["probability"],
+                "ML 위험도": prediction["risk_level"],
+                "규칙 기반 예측": (
+                    "피싱" if rule_predicted == 1 else "정상"
+                ),
+                "규칙 기반 점수": features["risk_score"],
+                "분석 상태": "성공",
+            })
+
+        except Exception as exc:
+
+            print(
+                f"{index + 2}행 분석 실패: {exc}"
+            )
+
+            results.append({
+                "URL": url,
+                "실제 라벨": actual,
+                "분석 상태": f"실패: {exc}",
+            })
+
+    if not actual_labels:
+        raise ValueError(
+            "평가 가능한 데이터가 없습니다."
+        )
+
+    # ML 모델 성능
+    print("\n=== XGBoost 성능 평가 ===")
+
+    print(
+        "Accuracy:",
+        round(
+            accuracy_score(
+                actual_labels,
+                predicted_labels
+            ),
+            4
+        )
+    )
+
+    print(
+        "Precision:",
+        round(
+            precision_score(
+                actual_labels,
+                predicted_labels,
+                zero_division=0
+            ),
+            4
+        )
+    )
+
+    print(
+        "Recall:",
+        round(
+            recall_score(
+                actual_labels,
+                predicted_labels,
+                zero_division=0
+            ),
+            4
+        )
+    )
+
+    print(
+        "F1-score:",
+        round(
+            f1_score(
+                actual_labels,
+                predicted_labels,
+                zero_division=0
+            ),
+            4
+        )
+    )
+
+    print("\n=== Classification Report ===")
+
+    print(
+        classification_report(
+            actual_labels,
+            predicted_labels,
+            labels=[0, 1],
+            target_names=["정상", "피싱"],
+            zero_division=0
+        )
+    )
+
+    print("\n=== Confusion Matrix ===")
+
+    cm = confusion_matrix(
+        actual_labels,
+        predicted_labels,
+        labels=[0, 1]
+    )
+
+    print(cm)
+
+    # 규칙 기반 성능
+    print("\n=== 규칙 기반 성능 ===")
+
+    print(
+        "Accuracy:",
+        round(
+            accuracy_score(
+                actual_labels,
+                rule_predictions
+            ),
+            4
+        )
+    )
+
+    print(
+        "Precision:",
+        round(
+            precision_score(
+                actual_labels,
+                rule_predictions,
+                zero_division=0
+            ),
+            4
+        )
+    )
+
+    print(
+        "Recall:",
+        round(
+            recall_score(
+                actual_labels,
+                rule_predictions,
+                zero_division=0
+            ),
+            4
+        )
+    )
+
+    print(
+        "F1-score:",
+        round(
+            f1_score(
+                actual_labels,
+                rule_predictions,
+                zero_division=0
+            ),
+            4
+        )
+    )
+
+    # 결과 엑셀 저장
     results_df = pd.DataFrame(results)
-    results_df.to_excel("test_results_detailed.xlsx", index=False)
-    print("\n상세 분류 결과가 'test_results_detailed.xlsx' 파일로 저장되었습니다.")
+
+    results_df.to_excel(
+        OUTPUT_FILE,
+        index=False
+    )
+
+    print(
+        f"\n상세 평가 결과 저장 완료: {OUTPUT_FILE}"
+    )
+
 
 if __name__ == "__main__":
-    evaluate_performance('test_dataset.xlsx')
+    evaluate_performance()
